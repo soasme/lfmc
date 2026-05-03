@@ -1,0 +1,22 @@
+# Build artifacts
+*.o
+lfmc
+tests/test_*
+!tests/test_*.c
+
+# Weight files
+weights/*.bin
+weights/*.gguf
+weights/*.safetensors
+
+# Data
+data/*.bin
+data/*.txt
+data/raw/
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/
