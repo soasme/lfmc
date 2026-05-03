@@ -30,11 +30,35 @@ LFMs were introduced by Liquid AI and are described in:
 - [x] Forward pass (inference)
 - [x] Tokenizer (BPE, byte-level)
 - [x] Text generation (greedy, top-k, top-p sampling)
-- [ ] Training from scratch (in progress)
+- [x] **Training from scratch** — full backprop through the ODE cell, Adam optimizer
+- [x] **Works: names dataset** — trains a tiny LFM to generate human-sounding names ([guide](docs/training-names.md))
 - [ ] LoRA fine-tuning (planned)
 - [ ] Weight loading from safetensors / GGUF (planned)
 - [ ] SIMD / AVX2 acceleration (planned)
 - [ ] CUDA backend (planned)
+
+---
+
+## Quick demo — train a name generator
+
+```bash
+# Download the names dataset
+curl -O https://raw.githubusercontent.com/karpathy/makemore/master/names.txt
+mkdir -p data && mv names.txt data/
+
+# Build and train (runs in ~8 min on CPU)
+gcc -O2 -march=native -D_GNU_SOURCE -o train_names train_names.c -lm
+./train_names data/names.txt
+```
+
+After ~30 epochs you get names like:
+
+```
+bradynn   zayden   nina   savika   mason
+malik     jaylen   kamil  maimie   karzan
+```
+
+See the full walkthrough in **[docs/training-names.md](docs/training-names.md)**.
 
 ---
 
@@ -51,6 +75,9 @@ lfmc/
 │   ├── optimizer.c/h   # Adam / AdamW optimizer
 │   ├── dataloader.c/h  # Streaming token data loader
 │   └── utils.c/h       # Misc helpers (timing, logging, random)
+├── train_names.c       # Self-contained names demo (start here)
+├── docs/
+│   └── training-names.md  # Step-by-step training guide
 ├── weights/            # Put pre-trained weight files here (gitignored)
 ├── data/               # Training data (gitignored)
 ├── Makefile
@@ -60,29 +87,16 @@ lfmc/
 
 ---
 
-## Quick Start
-
-### Build
+## General inference CLI
 
 ```bash
 make
-# or with debug symbols:
-make DEBUG=1
-```
-
-### Inference
-
-```bash
 ./lfmc infer --weights weights/lfm-1b.bin --prompt "Once upon a time"
 ```
 
 ### Train (tiny model from scratch)
 
 ```bash
-# Prepare data
-python3 scripts/prepare_data.py data/raw/tinyshakespeare.txt data/tokens.bin
-
-# Train
 ./lfmc train \
   --data   data/tokens.bin \
   --out    weights/lfm-tiny.bin \
@@ -127,6 +141,7 @@ make SIMD=avx2
 - [Liquid Neural Networks (Hasani et al., 2022)](https://arxiv.org/abs/2006.04439)
 - [microgpt-c](https://github.com/vixhal-baraiya/microgpt-c) — GPT-2 in pure C, the inspiration for this project
 - [llama2.c](https://github.com/karpathy/llama2.c) — Andrej Karpathy's minimal LLaMA in C
+- [makemore](https://github.com/karpathy/makemore) — Karpathy's name generator (names dataset source)
 
 ---
 
