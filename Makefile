@@ -1,7 +1,7 @@
 # Compiler and flags
 CC      ?= gcc
 CFLAGS  ?= -std=c99 -Wall -Wextra -O2 -march=native -D_GNU_SOURCE
-LDFLAGS ?= -lm
+LDFLAGS ?= -lm -D_GNU_SOURCE
 
 # Debug build
 ifeq ($(DEBUG),1)

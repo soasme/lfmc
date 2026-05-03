@@ -42,13 +42,17 @@ LFMs were introduced by Liquid AI and are described in:
 ## Quick demo — train a name generator
 
 ```bash
-# Download the names dataset
-curl -O https://raw.githubusercontent.com/karpathy/makemore/master/names.txt
-mkdir -p data && mv names.txt data/
+# 1. Build
+make
 
-# Build and train (runs in ~8 min on CPU)
-gcc -O2 -march=native -D_GNU_SOURCE -o train_names train_names.c -lm
-./train_names data/names.txt
+# 2. Data
+mkdir -p data weights
+curl -o data/names.txt \
+  https://raw.githubusercontent.com/karpathy/makemore/master/names.txt
+python3 scripts/prepare_data.py data/names.txt data/names_tokens.bin
+
+# 3. Train (~8 min on CPU)
+./lfmc train --data data/names_tokens.bin --out weights/names.bin
 ```
 
 After ~30 epochs you get names like:
