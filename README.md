@@ -34,8 +34,8 @@ LFMs were introduced by Liquid AI and are described in:
 - [x] **Works: names dataset** — trains a tiny LFM to generate human-sounding names ([guide](docs/training-names.md))
 - [ ] LoRA fine-tuning (planned)
 - [ ] Weight loading from safetensors / GGUF (planned)
-- [ ] SIMD / AVX2 acceleration (planned)
-- [ ] CUDA backend (planned)
+- [x] SIMD / AVX2 acceleration
+- [x] CUDA backend
 
 ---
 
