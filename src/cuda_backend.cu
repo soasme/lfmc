@@ -6,6 +6,8 @@
  *
  * All public functions accept host pointers and handle H2D/D2H transfers
  * internally, making it easy to drop-in replace CPU paths.
+ *
+ * All public functions call cuda_backend_init() lazily if not yet initialized.
  */
 
 #include "cuda_backend.h"
@@ -23,15 +25,21 @@
 static cublasHandle_t g_cublas = NULL;
 static int g_initialized = 0;
 
-/* Scratch device buffers — grown on demand */
-static float *g_dev_a   = NULL;
-static float *g_dev_b   = NULL;
-static float *g_dev_c   = NULL;
-static float *g_dev_tmp = NULL;   /* general scratch */
-static size_t g_dev_a_sz = 0;
-static size_t g_dev_b_sz = 0;
-static size_t g_dev_c_sz = 0;
+/*
+ * Grow-on-demand scratch device buffers.
+ * cuda_adam_step uses slots a/b/c/tmp for params/grad/m/v and d as norm_sq.
+ * All other ops use a and b (or just a for in-place).
+ */
+static float *g_dev_a   = NULL;   /* matmul A / in-place / adam params */
+static float *g_dev_b   = NULL;   /* matmul B / src      / adam grad   */
+static float *g_dev_c   = NULL;   /* matmul C            / adam m      */
+static float *g_dev_tmp = NULL;   /*                       adam v      */
+static float *g_dev_d   = NULL;   /* adam norm_sq scalar               */
+static size_t g_dev_a_sz   = 0;
+static size_t g_dev_b_sz   = 0;
+static size_t g_dev_c_sz   = 0;
 static size_t g_dev_tmp_sz = 0;
+static size_t g_dev_d_sz   = 0;
 
 /* ── Error helpers ───────────────────────────────────────────────────────── */
 
@@ -55,6 +63,7 @@ static size_t g_dev_tmp_sz = 0;
 static float *ensure_dev_buf(float **buf, size_t *cur_sz, size_t need_sz) {
     if (need_sz > *cur_sz) {
         if (*buf) CUDA_CHECK(cudaFree(*buf));
+        *buf = NULL;
         CUDA_CHECK(cudaMalloc((void**)buf, need_sz));
         *cur_sz = need_sz;
     }
@@ -72,13 +81,21 @@ extern "C" void cuda_backend_init(void) {
 
 extern "C" void cuda_backend_free(void) {
     if (!g_initialized) return;
-    if (g_dev_a)   cudaFree(g_dev_a);
-    if (g_dev_b)   cudaFree(g_dev_b);
-    if (g_dev_c)   cudaFree(g_dev_c);
-    if (g_dev_tmp) cudaFree(g_dev_tmp);
-    cublasDestroy(g_cublas);
+    /* Free scratch buffers and reset pointers + sizes to prevent use-after-free
+     * if the backend is re-initialized later. */
+    if (g_dev_a)   { CUDA_CHECK(cudaFree(g_dev_a));   g_dev_a   = NULL; g_dev_a_sz   = 0; }
+    if (g_dev_b)   { CUDA_CHECK(cudaFree(g_dev_b));   g_dev_b   = NULL; g_dev_b_sz   = 0; }
+    if (g_dev_c)   { CUDA_CHECK(cudaFree(g_dev_c));   g_dev_c   = NULL; g_dev_c_sz   = 0; }
+    if (g_dev_tmp) { CUDA_CHECK(cudaFree(g_dev_tmp)); g_dev_tmp = NULL; g_dev_tmp_sz = 0; }
+    if (g_dev_d)   { CUDA_CHECK(cudaFree(g_dev_d));   g_dev_d   = NULL; g_dev_d_sz   = 0; }
+    CUBLAS_CHECK(cublasDestroy(g_cublas));
     g_cublas = NULL;
     g_initialized = 0;
+}
+
+/* Lazy init helper — called at the top of every public entrypoint */
+static inline void ensure_init(void) {
+    if (!g_initialized) cuda_backend_init();
 }
 
 /* ── cuda_matmul ─────────────────────────────────────────────────────────── */
@@ -90,13 +107,11 @@ extern "C" void cuda_backend_free(void) {
  * is equivalent (in col-major cuBLAS convention) to:
  *   col-major C^T = B^T @ A^T
  * Since cuBLAS interprets our row-major A as col-major A^T etc., we call:
- *   cublasSgemm(N, N, C^T=B^T@A^T)  →  C = A@B  ✓
- *
- * cublasSgemm(handle, transa, transb, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc)
- * where m=N_out_cols, n=M_out_rows, k=K
+ *   cublasSgemm(OP_N, OP_N, N, M, K, alpha, B, N, A, K, beta, C, N)
  */
 extern "C" void cuda_matmul(float *out, const float *a, const float *b,
                              int M, int K, int N) {
+    ensure_init();
     size_t a_bytes  = (size_t)M * K * sizeof(float);
     size_t b_bytes  = (size_t)K * N * sizeof(float);
     size_t c_bytes  = (size_t)M * N * sizeof(float);
@@ -109,8 +124,6 @@ extern "C" void cuda_matmul(float *out, const float *a, const float *b,
     CUDA_CHECK(cudaMemcpy(db, b, b_bytes, cudaMemcpyHostToDevice));
 
     const float alpha = 1.0f, beta = 0.0f;
-    /* C[M,N] = A[M,K] @ B[K,N]  row-major
-     * = cublasSgemm(handle, OP_N, OP_N, N, M, K, &alpha, db, N, da, K, &beta, dc, N) */
     CUBLAS_CHECK(cublasSgemm(g_cublas,
                              CUBLAS_OP_N, CUBLAS_OP_N,
                              N, M, K,
@@ -154,6 +167,7 @@ __global__ static void k_silu(float *arr, int n) {
 #define GRID(n) (((n) + BLOCK - 1) / BLOCK)
 
 extern "C" void cuda_saxpy(float *dst, const float *src, float alpha, int n) {
+    ensure_init();
     size_t bytes = (size_t)n * sizeof(float);
     float *d_dst = ensure_dev_buf(&g_dev_a, &g_dev_a_sz, bytes);
     float *d_src = ensure_dev_buf(&g_dev_b, &g_dev_b_sz, bytes);
@@ -164,6 +178,7 @@ extern "C" void cuda_saxpy(float *dst, const float *src, float alpha, int n) {
 }
 
 extern "C" void cuda_add(float *dst, const float *src, int n) {
+    ensure_init();
     size_t bytes = (size_t)n * sizeof(float);
     float *d_dst = ensure_dev_buf(&g_dev_a, &g_dev_a_sz, bytes);
     float *d_src = ensure_dev_buf(&g_dev_b, &g_dev_b_sz, bytes);
@@ -174,6 +189,7 @@ extern "C" void cuda_add(float *dst, const float *src, int n) {
 }
 
 extern "C" void cuda_scale(float *arr, float s, int n) {
+    ensure_init();
     size_t bytes = (size_t)n * sizeof(float);
     float *d_arr = ensure_dev_buf(&g_dev_a, &g_dev_a_sz, bytes);
     CUDA_CHECK(cudaMemcpy(d_arr, arr, bytes, cudaMemcpyHostToDevice));
@@ -182,6 +198,7 @@ extern "C" void cuda_scale(float *arr, float s, int n) {
 }
 
 extern "C" void cuda_tanh_activation(float *arr, int n) {
+    ensure_init();
     size_t bytes = (size_t)n * sizeof(float);
     float *d_arr = ensure_dev_buf(&g_dev_a, &g_dev_a_sz, bytes);
     CUDA_CHECK(cudaMemcpy(d_arr, arr, bytes, cudaMemcpyHostToDevice));
@@ -190,6 +207,7 @@ extern "C" void cuda_tanh_activation(float *arr, int n) {
 }
 
 extern "C" void cuda_silu_activation(float *arr, int n) {
+    ensure_init();
     size_t bytes = (size_t)n * sizeof(float);
     float *d_arr = ensure_dev_buf(&g_dev_a, &g_dev_a_sz, bytes);
     CUDA_CHECK(cudaMemcpy(d_arr, arr, bytes, cudaMemcpyHostToDevice));
@@ -199,9 +217,17 @@ extern "C" void cuda_silu_activation(float *arr, int n) {
 
 /* ── Fused Adam kernel ───────────────────────────────────────────────────── */
 /*
- * Two-pass implementation:
- *   Pass 1 (k_adam_norm): compute sum of squared gradients via atomicAdd
- *   Pass 2 (k_adam_update): clip + m/v update + param update
+ * Two-pass implementation using the shared grow-on-demand scratch buffers:
+ *   g_dev_a  = d_params
+ *   g_dev_b  = d_grad
+ *   g_dev_c  = d_m
+ *   g_dev_tmp= d_v
+ *   g_dev_d  = d_norm_sq  (single float)
+ *
+ * No per-call cudaMalloc — buffers are grown once and reused across steps.
+ *
+ * Pass 1 (k_adam_norm): reduce sum(grad[i]^2) via atomicAdd into d_norm_sq
+ * Pass 2 (k_adam_update): clip + m/v update + param update
  */
 
 __global__ static void k_adam_norm(const float *grad, float *norm_sq, int n) {
@@ -225,15 +251,15 @@ __global__ static void k_adam_update(float *params, float *grad,
 extern "C" void cuda_adam_step(float *params, float *grad, float *m, float *v,
                                 int n, int step,
                                 float lr, float b1, float b2, float eps, float clip) {
+    ensure_init();
     size_t bytes = (size_t)n * sizeof(float);
 
-    /* Allocate device buffers */
-    float *d_params, *d_grad, *d_m, *d_v, *d_norm_sq;
-    CUDA_CHECK(cudaMalloc((void**)&d_params,  bytes));
-    CUDA_CHECK(cudaMalloc((void**)&d_grad,    bytes));
-    CUDA_CHECK(cudaMalloc((void**)&d_m,       bytes));
-    CUDA_CHECK(cudaMalloc((void**)&d_v,       bytes));
-    CUDA_CHECK(cudaMalloc((void**)&d_norm_sq, sizeof(float)));
+    /* Reuse shared scratch buffers — no per-call allocations */
+    float *d_params  = ensure_dev_buf(&g_dev_a,   &g_dev_a_sz,   bytes);
+    float *d_grad    = ensure_dev_buf(&g_dev_b,   &g_dev_b_sz,   bytes);
+    float *d_m       = ensure_dev_buf(&g_dev_c,   &g_dev_c_sz,   bytes);
+    float *d_v       = ensure_dev_buf(&g_dev_tmp, &g_dev_tmp_sz, bytes);
+    float *d_norm_sq = ensure_dev_buf(&g_dev_d,   &g_dev_d_sz,   sizeof(float));
 
     CUDA_CHECK(cudaMemcpy(d_params, params, bytes, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_grad,   grad,   bytes, cudaMemcpyHostToDevice));
@@ -241,7 +267,7 @@ extern "C" void cuda_adam_step(float *params, float *grad, float *m, float *v,
     CUDA_CHECK(cudaMemcpy(d_v,      v,      bytes, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemset(d_norm_sq, 0, sizeof(float)));
 
-    /* Pass 1: compute gradient norm^2 */
+    /* Pass 1: compute gradient L2 norm^2 */
     k_adam_norm<<<GRID(n), BLOCK>>>(d_grad, d_norm_sq, n);
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -254,7 +280,7 @@ extern "C" void cuda_adam_step(float *params, float *grad, float *m, float *v,
     float lr_t = lr * sqrtf(1.0f - powf(b2, (float)step))
                     / (1.0f - powf(b1, (float)step));
 
-    /* Pass 2: update */
+    /* Pass 2: clip + update m, v, params */
     k_adam_update<<<GRID(n), BLOCK>>>(d_params, d_grad, d_m, d_v,
                                        n, clip_scale, lr_t, b1, b2, eps);
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -262,10 +288,6 @@ extern "C" void cuda_adam_step(float *params, float *grad, float *m, float *v,
     CUDA_CHECK(cudaMemcpy(params, d_params, bytes, cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(m,      d_m,      bytes, cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(v,      d_v,      bytes, cudaMemcpyDeviceToHost));
-
-    cudaFree(d_params); cudaFree(d_grad);
-    cudaFree(d_m);      cudaFree(d_v);
-    cudaFree(d_norm_sq);
 }
 
 #endif /* USE_CUDA */

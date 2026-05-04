@@ -71,11 +71,69 @@ static void test_layer_norm() {
     printf("PASS: layer_norm\n");
 }
 
+static void test_tanh() {
+    /* Test tensor_tanh: values in range [-3, 3] and outside */
+    int sh[1] = {13};
+    Tensor *t = tensor_zeros(1, sh);
+    float inputs[] = {-4.0f, -3.0f, -2.0f, -1.0f, -0.5f, 0.0f,
+                       0.5f,  1.0f,  2.0f,  3.0f,  4.0f, 0.1f, -0.1f};
+    for (int i = 0; i < 13; i++) t->data[i] = inputs[i];
+    tensor_tanh(t);
+
+    /* Allow up to 0.025 error vs exact tanhf.
+     * The approximation x*(27+x²)/(27+9x²) has worst-case error ~2% at |x|≈2.
+     * It is intentionally a fast low-precision approximation for training where
+     * exact activation values are not required. */
+    for (int i = 0; i < 13; i++) {
+        float expected = tanhf(inputs[i]);
+        float got      = t->data[i];
+        float err      = fabsf(got - expected);
+        if (err > 0.025f) {
+            fprintf(stderr, "FAIL: tanh[%d] input=%.3f expected=%.6f got=%.6f err=%.6f\n",
+                    i, inputs[i], expected, got, err);
+            assert(0);
+        }
+    }
+    /* Clamping: |result| <= 1 always */
+    for (int i = 0; i < 13; i++) {
+        assert(t->data[i] >= -1.0f && t->data[i] <= 1.0f);
+    }
+    tensor_free(t);
+    printf("PASS: tanh\n");
+}
+
+static void test_silu() {
+    /* Test tensor_silu: SiLU(x) = x * sigmoid(x) */
+    int sh[1] = {9};
+    Tensor *t = tensor_zeros(1, sh);
+    float inputs[] = {-4.0f, -2.0f, -1.0f, -0.5f, 0.0f, 0.5f, 1.0f, 2.0f, 4.0f};
+    for (int i = 0; i < 9; i++) t->data[i] = inputs[i];
+    tensor_silu(t);
+
+    for (int i = 0; i < 9; i++) {
+        float x        = inputs[i];
+        float expected = x / (1.0f + expf(-x));
+        float got      = t->data[i];
+        float err      = fabsf(got - expected);
+        if (err > 1e-5f) {
+            fprintf(stderr, "FAIL: silu[%d] input=%.3f expected=%.6f got=%.6f err=%.6f\n",
+                    i, x, expected, got, err);
+            assert(0);
+        }
+    }
+    /* SiLU(0) == 0 */
+    assert(fabsf(t->data[4]) < 1e-6f);
+    tensor_free(t);
+    printf("PASS: silu\n");
+}
+
 int main() {
     test_alloc_free();
     test_matmul();
     test_softmax();
     test_layer_norm();
+    test_tanh();
+    test_silu();
     printf("All tensor tests passed.\n");
     return 0;
 }

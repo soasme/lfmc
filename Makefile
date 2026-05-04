@@ -53,4 +53,4 @@ $(TEST_DIR)/%: $(TEST_DIR)/%.c $(filter-out $(SRC_DIR)/main.o, $(OBJS))
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(TEST_BINS) $(CUDA_OBJS)
+	rm -f $(OBJS) $(TARGET) $(TEST_BINS) $(CUDA_OBJS) src/cuda_backend.o
