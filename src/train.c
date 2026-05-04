@@ -17,6 +17,7 @@
 #include "model.h"
 #include "sampler.h"
 #include "tokenizer.h"
+#include "simd.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -287,9 +288,9 @@ static float fwd_bwd_seq(LFMModel *m, float *grad_flat, FlatView *fv,
         for (int s = 0; s < S; s++) {
             for (int i = 0; i < H; i++) {
                 HPC(t,s,i) = h[i];
-                float z = bh[i];
-                for (int j = 0; j < H; j++)
-                    z += Win[i*H+j]*x[j] + Whh[i*H+j]*h[j];
+                float z = bh[i]
+                        + simd_dot(&Win[i*H], x, H)
+                        + simd_dot(&Whh[i*H], h, H);
                 float f   = tanhf(z);
                 float tau = sp(ltau[i]);
                 ZC(t,s,i) = z;
@@ -351,16 +352,20 @@ static float fwd_bwd_seq(LFMModel *m, float *grad_flat, FlatView *fv,
                 dh[i]    *= (1.f - dt / tau[i]);
             }
 
-            for (int j = 0; j < H; j++) {
-                float ahh=0.f, ax=0.f;
-                for (int i = 0; i < H; i++) {
-                    gWin[i*H+j]  += dz[i]    * x[j];
-                    gWhh[i*H+j]  += dz[i]    * hp[j];
-                    ahh          += Whh[i*H+j]* dz[i];
-                    ax           += Win[i*H+j]* dz[i];
-                }
-                dh[j]              += ahh;
-                gWe[tok[t]*H + j]  += ax;
+            /* Accumulate weight grads and propagate dh using SIMD saxpy/dot */
+            for (int i = 0; i < H; i++) {
+                /* gWin[i,:] += dz[i] * x[:] */
+                simd_saxpy(&gWin[i*H], x,  dz[i], H);
+                /* gWhh[i,:] += dz[i] * hp[:] */
+                simd_saxpy(&gWhh[i*H], hp, dz[i], H);
+            }
+            /* dh[j] += Whh[:,j]^T @ dz  and  gWe[tok] += Win[:,j]^T @ dz
+             * Rewrite as: dh += Whh^T @ dz  →  for each row i, dh += Whh[i,:] * dz[i]
+             * But Whh[i,j] contributes to dh[j] — that's Whh^T @ dz.
+             * In saxpy form: for each i, dh += dz[i] * Whh[i,:] */
+            for (int i = 0; i < H; i++) {
+                simd_saxpy(dh, &Whh[i*H], dz[i], H);
+                simd_saxpy(&gWe[tok[t]*H], &Win[i*H], dz[i], H);
             }
         }
     }
