@@ -10,7 +10,16 @@ endif
 
 # SIMD
 ifeq ($(SIMD),avx2)
-CFLAGS += -mavx2 -DUSE_AVX2
+CFLAGS += -mavx2 -mfma -DUSE_AVX2
+endif
+
+# CUDA backend
+ifeq ($(CUDA),1)
+NVCC      ?= nvcc
+NVCCFLAGS ?= -O2 -arch=sm_75 --compiler-options -fPIC -DUSE_CUDA
+CFLAGS    += -DUSE_CUDA
+CUDA_OBJS  = src/cuda_backend.o
+LDFLAGS   += -lcublas -lcudart
 endif
 
 # Sources
@@ -28,11 +37,14 @@ TEST_BINS = $(TEST_SRCS:.c=)
 
 all: $(TARGET)
 
-$(TARGET): $(OBJS)
+$(TARGET): $(OBJS) $(CUDA_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(SRC_DIR)/%.o: $(SRC_DIR)/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/cuda_backend.o: src/cuda_backend.cu src/cuda_backend.h
+	$(NVCC) $(NVCCFLAGS) -c -o $@ $<
 
 test: $(TEST_BINS)
 	@for t in $(TEST_BINS); do echo "==> $$t"; ./$$t; done
@@ -41,4 +53,4 @@ $(TEST_DIR)/%: $(TEST_DIR)/%.c $(filter-out $(SRC_DIR)/main.o, $(OBJS))
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(TEST_BINS)
+	rm -f $(OBJS) $(TARGET) $(TEST_BINS) $(CUDA_OBJS)

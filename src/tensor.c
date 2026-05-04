@@ -1,4 +1,5 @@
 #include "tensor.h"
+#include "simd.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -69,17 +70,17 @@ void tensor_fill(Tensor *t, float val) {
 }
 
 void tensor_scale(Tensor *t, float s) {
-    for (size_t i = 0; i < t->size; i++) t->data[i] *= s;
+    simd_scale(t->data, s, (int)t->size);
 }
 
 void tensor_add_inplace(Tensor *dst, const Tensor *src) {
     assert(dst->size == src->size);
-    for (size_t i = 0; i < dst->size; i++) dst->data[i] += src->data[i];
+    simd_add(dst->data, src->data, (int)dst->size);
 }
 
 void tensor_mul_inplace(Tensor *dst, const Tensor *src) {
     assert(dst->size == src->size);
-    for (size_t i = 0; i < dst->size; i++) dst->data[i] *= src->data[i];
+    simd_mul_elementwise(dst->data, src->data, (int)dst->size);
 }
 
 void tensor_copy(Tensor *dst, const Tensor *src) {
@@ -91,7 +92,7 @@ void tensor_copy(Tensor *dst, const Tensor *src) {
 /* Neural-net ops                                                              */
 /* -------------------------------------------------------------------------- */
 
-/* Naive matmul: out[M,N] = a[M,K] @ b[K,N] */
+/* Matmul with AVX2-accelerated inner product: out[M,N] = a[M,K] @ b[K,N] */
 void tensor_matmul(Tensor *out, const Tensor *a, const Tensor *b) {
     assert(a->ndim >= 2 && b->ndim >= 2 && out->ndim >= 2);
     int M = a->shape[a->ndim-2];
@@ -103,11 +104,8 @@ void tensor_matmul(Tensor *out, const Tensor *a, const Tensor *b) {
 
     memset(out->data, 0, out->size * sizeof(float));
     for (int m = 0; m < M; m++)
-        for (int k = 0; k < K; k++) {
-            float aval = a->data[m * K + k];
-            for (int n = 0; n < N; n++)
-                out->data[m * N + n] += aval * b->data[k * N + n];
-        }
+        for (int k = 0; k < K; k++)
+            simd_saxpy(&out->data[m * N], &b->data[k * N], a->data[m * K + k], N);
 }
 
 void tensor_softmax(Tensor *t, int axis) {
@@ -141,14 +139,11 @@ void tensor_layer_norm(Tensor *out, const Tensor *in,
 }
 
 void tensor_silu(Tensor *t) {
-    for (size_t i = 0; i < t->size; i++) {
-        float x = t->data[i];
-        t->data[i] = x / (1.0f + expf(-x));
-    }
+    simd_silu(t->data, (int)t->size);
 }
 
 void tensor_tanh(Tensor *t) {
-    for (size_t i = 0; i < t->size; i++) t->data[i] = tanhf(t->data[i]);
+    simd_tanh(t->data, (int)t->size);
 }
 
 void tensor_sigmoid(Tensor *t) {
